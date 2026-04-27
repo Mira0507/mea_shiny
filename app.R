@@ -330,6 +330,41 @@ gallery_ui <- function(rows, image_class = "plot-img") {
   )
 }
 
+heatmap_plate_gallery_ui <- function(rows) {
+  if (nrow(rows) == 0) {
+    return(empty_state("No heatmaps found."))
+  }
+
+  rows <- rows |>
+    mutate(
+      plate_key = if_else(is.na(plate) | plate == "", "Unlabeled plate", plate),
+      plate_tab = coalesce(str_extract(plate_key, "PLATE\\d+$"), plate_key)
+    ) |>
+    arrange(plate_key, well, file)
+  plate_tabs <- rows |>
+    distinct(plate_key, plate_tab) |>
+    arrange(plate_key)
+  if (anyDuplicated(plate_tabs$plate_tab)) {
+    plate_tabs <- plate_tabs |>
+      mutate(plate_tab = plate_key)
+  }
+
+  tabs <- lapply(seq_len(nrow(plate_tabs)), function(i) {
+    key <- plate_tabs$plate_key[[i]]
+    label <- plate_tabs$plate_tab[[i]]
+    plate_rows <- rows |>
+      filter(plate_key == key) |>
+      select(-plate_key, -plate_tab)
+
+    nav_panel(
+      label,
+      gallery_ui(plate_rows, "heatmap-img")
+    )
+  })
+
+  do.call(navset_tab, tabs)
+}
+
 heatmap_view_ui <- function(rows, legend_rows) {
   if (nrow(rows) == 0) {
     return(empty_state("No heatmaps found."))
@@ -339,7 +374,7 @@ heatmap_view_ui <- function(rows, legend_rows) {
     class = "heatmap-view",
     div(
       class = "heatmap-main",
-      gallery_ui(rows, "heatmap-img")
+      heatmap_plate_gallery_ui(rows)
     ),
     div(
       class = "heatmap-legend",
@@ -463,12 +498,6 @@ ui <- page_navbar(
         color: #5b626c;
         padding: 18px;
       }
-      .heatmap-controls {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-        gap: 10px;
-        margin-bottom: 14px;
-      }
       .heatmap-view {
         display: grid;
         grid-template-columns: minmax(280px, 1fr) minmax(260px, 420px);
@@ -532,7 +561,6 @@ ui <- page_navbar(
     "Amplitude Heatmaps",
     div(
       class = "page-wrap",
-      uiOutput("amplitude_heatmap_controls"),
       uiOutput("amplitude_heatmap_view")
     )
   ),
@@ -540,7 +568,6 @@ ui <- page_navbar(
     "MFR Heatmaps",
     div(
       class = "page-wrap",
-      uiOutput("mfr_heatmap_controls"),
       uiOutput("mfr_heatmap_view")
     )
   ),
@@ -714,115 +741,27 @@ server <- function(input, output, session) {
     }
   }
 
-  heatmap_controls <- function(category_name, prefix) {
-    rows <- heatmap_rows(category_name)
-    if (nrow(rows) == 0) {
-      return(empty_state("No heatmaps found."))
-    }
-
-    protocols <- sort(unique(na.omit(rows$protocol)))
-    experiments <- sort(unique(na.omit(rows$experiment)))
-    plates <- sort(unique(na.omit(rows$plate)))
-
-    div(
-      class = "heatmap-controls",
-      selectInput(paste0(prefix, "_protocol"), "Protocol", choices = c("All", protocols)),
-      selectInput(paste0(prefix, "_experiment"), "Experiment", choices = c("All", experiments)),
-      selectInput(paste0(prefix, "_plate"), "Plate", choices = c("All", plates)),
-      actionButton(paste0(prefix, "_update"), "Update heatmaps", icon = icon("rotate"))
-    )
+  all_heatmap_rows <- function(category_name) {
+    heatmap_rows(category_name) |>
+      arrange(protocol, experiment, plate, well, file)
   }
-
-  heatmap_selection <- function(prefix) {
-    list(
-      protocol = input[[paste0(prefix, "_protocol")]],
-      experiment = input[[paste0(prefix, "_experiment")]],
-      plate = input[[paste0(prefix, "_plate")]]
-    )
-  }
-
-  heatmap_selection_has_filter <- function(selection) {
-    any(vapply(selection, function(value) {
-      !is.null(value) && !is.na(value) && value != "All"
-    }, logical(1)))
-  }
-
-  selected_heatmap_rows <- function(category_name, selection) {
-    rows <- heatmap_rows(category_name)
-
-    protocol <- selection$protocol
-    experiment <- selection$experiment
-    plate <- selection$plate
-
-    if (!is.null(protocol) && protocol != "All") {
-      rows <- rows |> filter(protocol == !!protocol)
-    }
-    if (!is.null(experiment) && experiment != "All") {
-      rows <- rows |> filter(experiment == !!experiment)
-    }
-    if (!is.null(plate) && plate != "All") {
-      rows <- rows |> filter(plate == !!plate)
-    }
-
-    rows
-  }
-
-  output$amplitude_heatmap_controls <- renderUI({
-    heatmap_controls("amplitude_heatmap", "amp_heatmap")
-  })
-
-  amplitude_heatmap_selection <- reactiveVal(NULL)
-
-  observeEvent(input$amp_heatmap_update, {
-    selection <- heatmap_selection("amp_heatmap")
-    if (heatmap_selection_has_filter(selection)) {
-      amplitude_heatmap_selection(selection)
-    } else {
-      amplitude_heatmap_selection(NULL)
-    }
-  }, ignoreInit = TRUE)
 
   output$amplitude_heatmap_view <- renderUI({
-    selection <- amplitude_heatmap_selection()
-    if (is.null(selection)) {
-      return(empty_state("Select a protocol, experiment, or plate, then click Update heatmaps."))
-    }
-    if (!heatmap_selection_has_filter(selection)) {
-      return(empty_state("Select a protocol, experiment, or plate, then click Update heatmaps."))
-    }
-
-    rows <- selected_heatmap_rows("amplitude_heatmap", selection)
+    rows <- all_heatmap_rows("amplitude_heatmap")
     legends <- heatmap_legend_rows("amplitude_heatmap", rows)
-    heatmap_view_ui(rows, legends)
+    tagList(
+      div(class = "run-status", paste("Matching heatmaps:", nrow(rows), "| Plates:", n_distinct(rows$plate, na.rm = TRUE))),
+      heatmap_view_ui(rows, legends)
+    )
   })
-
-  output$mfr_heatmap_controls <- renderUI({
-    heatmap_controls("mfr_heatmap", "mfr_heatmap")
-  })
-
-  mfr_heatmap_selection <- reactiveVal(NULL)
-
-  observeEvent(input$mfr_heatmap_update, {
-    selection <- heatmap_selection("mfr_heatmap")
-    if (heatmap_selection_has_filter(selection)) {
-      mfr_heatmap_selection(selection)
-    } else {
-      mfr_heatmap_selection(NULL)
-    }
-  }, ignoreInit = TRUE)
 
   output$mfr_heatmap_view <- renderUI({
-    selection <- mfr_heatmap_selection()
-    if (is.null(selection)) {
-      return(empty_state("Select a protocol, experiment, or plate, then click Update heatmaps."))
-    }
-    if (!heatmap_selection_has_filter(selection)) {
-      return(empty_state("Select a protocol, experiment, or plate, then click Update heatmaps."))
-    }
-
-    rows <- selected_heatmap_rows("mfr_heatmap", selection)
+    rows <- all_heatmap_rows("mfr_heatmap")
     legends <- heatmap_legend_rows("mfr_heatmap", rows)
-    heatmap_view_ui(rows, legends)
+    tagList(
+      div(class = "run-status", paste("Matching heatmaps:", nrow(rows), "| Plates:", n_distinct(rows$plate, na.rm = TRUE))),
+      heatmap_view_ui(rows, legends)
+    )
   })
 
   output$raster_gallery <- renderUI({
