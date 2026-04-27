@@ -1,0 +1,1172 @@
+---
+title: "MEA Organoids Spontaneous Baseline Analysis"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: hide
+    self_contained: true
+    df_print: paged
+knit: !expr |
+  function(input_file, encoding) {
+    input_dir <- dirname(input_file)
+    if (identical(input_dir, ".") && file.exists(file.path("analysis", basename(input_file)))) {
+      input_dir <- "analysis"
+    }
+    project_root <- normalizePath(file.path(input_dir, ".."), mustWork = TRUE)
+    output_dir <- file.path(project_root, "output")
+    if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+    rmarkdown::render(input_file, encoding = encoding, output_dir = output_dir)
+  }
+---
+
+```{r setup, include=FALSE}
+input_dir <- dirname(knitr::current_input())
+if (identical(input_dir, ".") && file.exists(file.path("analysis", basename(knitr::current_input())))) {
+  input_dir <- "analysis"
+}
+project_root <- normalizePath(file.path(input_dir, ".."), mustWork = TRUE)
+local_r_lib <- file.path(project_root, "env", "lib", "R", "library")
+if (dir.exists(local_r_lib)) {
+  .libPaths(c(local_r_lib, .libPaths()))
+}
+knitr::opts_knit$set(root.dir = project_root)
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+
+HTML_OUTPUT_FOLDER <- "output"
+```
+
+```{r mea-analysis-settings}
+# ============================================================
+#  MEA ORGANOID ANALYSIS — MASTER SCRIPT v5
+#  Axion Biosystems Maestro | 12-well MEA plates
+#  Spontaneous activity | Cortical & Thalamic organoids
+# ============================================================
+#
+#  HOW TO USE THIS SCRIPT — ONLY 3 STEPS:
+#
+#  STEP 1: Set ROOT_FOLDER to your top-level MEA input folder
+#  STEP 2: Fill in the experiment_table — one row per experiment folder
+#  STEP 3: Run the whole script — everything else is automatic
+#
+#  PLOT LAYOUTS:
+#  - Violin      : pooled per genotype | x-axis = age group + genotype combined
+#  - Heatmaps    : ONE PNG per plate | all wells side by side incl. PBS
+#  - Raster      : one panel per well (organoid) | top electrodes shown
+#  - ISI         : pooled per genotype | age side by side | PBS overlaid
+#
+#  MEA GRID (Axion 12-well, 8x8 per well):
+#  First digit = column (1=left → 8=right)
+#  Second digit = row (1=bottom → 8=top)
+#
+# ============================================================
+
+library(tidyverse)
+library(ggridges)
+library(readxl)
+library(cowplot)   # for extracting legend as separate PNG
+library(ggforce)   # for sina plots
+
+# ============================================================
+# ===   SECTION 1: USER SETTINGS (ONLY EDIT THIS SECTION)  ==
+# ============================================================
+
+# ------------------------------------------------------------------
+# STEP 1: FOLDER PATHS
+# ------------------------------------------------------------------
+ROOT_FOLDER   <- "input"
+OUTPUT_FOLDER <- HTML_OUTPUT_FOLDER
+
+# ------------------------------------------------------------------
+# STEP 2: EXPERIMENT TABLE
+# One row per experiment folder.
+# protocol      : "CORTEX" or "THALAMUS" — always analysed separately
+# experiment_id : short label used in plot titles and filenames
+# ------------------------------------------------------------------
+experiment_table <- tribble(
+  ~experiment_folder,          ~protocol,   ~experiment_id,
+  "5_MEA_experiment_5-2026",   "CORTEX",    "Exp5",
+)
+
+# ------------------------------------------------------------------
+# STEP 3: GENOTYPE ORDER
+# Order in which genotypes appear left-to-right within each age group.
+# ------------------------------------------------------------------
+CORTEX_GENOTYPE_ORDER   <- c("WT/REV", "WT/GRN", "REV/REV", "GRN/GRN")
+THALAMUS_GENOTYPE_ORDER <- c("WT/REV", "WT/GRN", "REV/REV", "GRN/GRN")
+
+# ------------------------------------------------------------------
+# STEP 4: GENOTYPE NAME HARMONISATION
+# Map any spelling variants to the correct name.
+# Left = what's in your metadata, Right = correct name.
+# Now that metadata is corrected to REV/REV, this can be left empty
+# or kept as a safety net.
+# ------------------------------------------------------------------
+GENOTYPE_HARMONISE <- c(
+  "RE/REV" = "REV/REV"   # safety net in case any old files still use RE/REV
+)
+
+# ------------------------------------------------------------------
+# STEP 5: PBS CONTROL IDENTIFIER
+# String to detect PBS wells in the GENOTYPE column (case-insensitive).
+# ------------------------------------------------------------------
+PBS_LABEL <- "PBS"
+
+# ------------------------------------------------------------------
+# STEP 6: ANALYSIS TOGGLES
+# ------------------------------------------------------------------
+RUN_VIOLIN_AMPLITUDE  <- TRUE
+RUN_VIOLIN_MFR        <- TRUE
+RUN_HEATMAP_AMPLITUDE <- TRUE
+RUN_HEATMAP_MFR       <- TRUE
+RUN_RASTER            <- TRUE
+RUN_ISI_RIDGELINE     <- TRUE
+
+# ------------------------------------------------------------------
+# OPTIONAL: SUBSET FILTERS
+# Leave NULL to include everything.
+# PBS wells are always kept regardless of filters.
+# Examples:
+#   SUBSET_GENOTYPES   <- c("WT/REV", "WT/GRN")
+#   SUBSET_AGES        <- c(10)
+#   SUBSET_BATCHES     <- c(8)
+#   SUBSET_EXPERIMENTS <- c("Exp4", "Exp5")
+# ------------------------------------------------------------------
+SUBSET_GENOTYPES   <- NULL
+SUBSET_AGES        <- NULL
+SUBSET_BATCHES     <- NULL
+SUBSET_EXPERIMENTS <- NULL
+
+# ------------------------------------------------------------------
+# OPTIONAL: RASTER SETTINGS
+# N_RASTER_ELECTRODES: how many top electrodes to show per well
+# RASTER_ELECTRODES: NULL = auto (top N most active per well)
+#                    or specify manually: c("A1_34", "A1_44")
+# ------------------------------------------------------------------
+N_RASTER_ELECTRODES <- 5
+RASTER_ELECTRODES   <- NULL
+RASTER_START_TIME   <- 60
+RASTER_END_TIME     <- 120
+
+# ------------------------------------------------------------------
+# OPTIONAL: CUSTOM COLOUR PALETTE
+# NULL = auto-generated. To override:
+# CUSTOM_PALETTE <- c("WT/REV"  = "#0D47A1",
+#                     "WT/GRN"  = "#43A047",
+#                     "REV/REV" = "#E53935",
+#                     "GRN/GRN" = "#FB8C00",
+#                     "PBS"     = "grey60")
+# ------------------------------------------------------------------
+CUSTOM_PALETTE <- NULL
+
+# ============================================================
+# ===  END OF USER SETTINGS — DO NOT EDIT BELOW THIS LINE  ==
+# ============================================================
+
+if (!dir.exists(OUTPUT_FOLDER)) dir.create(OUTPUT_FOLDER, recursive = TRUE)
+
+emit_saved_png <- function(fname) {
+  rel_path <- utils::URLencode(basename(fname), reserved = TRUE)
+  cat("\n\n")
+  cat(paste0("**Saved PNG:** [", basename(fname), "](", rel_path, ")\n\n"))
+  cat(paste0("<img src=\"", rel_path,
+             "\" alt=\"", basename(fname),
+             "\" style=\"max-width:100%; height:auto;\" />\n\n"))
+  invisible(fname)
+}
+
+```
+
+```{r file-discovery-loading-functions}
+# ============================================================
+# --- SECTION 2: FILE DISCOVERY & LOADING ---
+# ============================================================
+
+detect_header_rows <- function(filepath) {
+  raw_lines  <- readLines(filepath, n = 200, warn = FALSE)
+  header_row <- which(str_detect(raw_lines, "Time \\(s\\)"))[1]
+  if (is.na(header_row)) stop(paste("Could not find 'Time (s)' in:", filepath))
+  return(header_row - 1)
+}
+
+load_spike_file <- function(filepath) {
+  skip_n <- detect_header_rows(filepath)
+  read_csv(filepath, skip = skip_n, show_col_types = FALSE, name_repair = "unique") %>%
+    select(any_of(c("Time (s)", "Electrode", "Amplitude (mV)"))) %>%
+    setNames(c("time_s", "electrode_id", "amplitude_mv")) %>%
+    mutate(
+      time_s       = suppressWarnings(as.numeric(time_s)),
+      amplitude_mv = suppressWarnings(as.numeric(amplitude_mv))
+    ) %>%
+    filter(!is.na(time_s), !is.na(amplitude_mv)) %>%
+    separate(electrode_id, into = c("well", "electrode_num"),
+             sep = "_", remove = FALSE, extra = "merge") %>%
+    mutate(
+      mea_col      = suppressWarnings(as.numeric(str_sub(electrode_num, 1, 1))),
+      mea_row      = suppressWarnings(as.numeric(str_sub(electrode_num, 2, 2))),
+      amplitude_uv = amplitude_mv * 1000
+    ) %>%
+    filter(!is.na(mea_row), !is.na(mea_col)) %>%
+    select(time_s, electrode_id, well, mea_row, mea_col, amplitude_uv)
+}
+
+load_metadata_xlsx <- function(filepath) {
+  raw        <- read_xlsx(filepath, col_names = FALSE)
+  row_labels <- as.character(raw[[1]])
+  
+  well_row_idx <- which(str_trim(str_to_upper(row_labels)) == "MEA WELL")[1]
+  if (is.na(well_row_idx)) stop(paste("Could not find 'MEA WELL' row in:", filepath))
+  
+  wells   <- as.character(raw[well_row_idx, -1])
+  wells   <- wells[!is.na(wells) & wells != "NA"]
+  n_wells <- length(wells)
+  
+  get_row <- function(label) {
+    idx <- which(str_trim(str_to_upper(row_labels)) == str_to_upper(label))[1]
+    if (is.na(idx)) return(rep(NA_character_, n_wells))
+    vals <- as.character(raw[idx, 2:(n_wells + 1)])
+    vals[vals == "NA"] <- NA_character_
+    vals
+  }
+  
+  tibble(
+    well       = wells,
+    recorded   = get_row("RECORDED"),
+    genotype   = get_row("GENOTYPE"),
+    protocol   = get_row("PROTOCOL"),
+    age_weeks  = suppressWarnings(as.numeric(get_row("AGE (WEEKS)"))),
+    batch      = suppressWarnings(as.numeric(get_row("BATCH"))),
+    n_organoid = suppressWarnings(as.numeric(get_row("#ORGANOID"))),
+    n_slice    = suppressWarnings(as.numeric(get_row("#SLICE")))
+  ) %>%
+    filter(is.na(recorded) | str_to_upper(recorded) == "TRUE")
+}
+
+discover_plate_files <- function(exp_folder_path, experiment_id, protocol) {
+  meta_files <- list.files(exp_folder_path, pattern = "\\.xlsx$",
+                           full.names = TRUE, recursive = FALSE)
+  if (length(meta_files) == 0) {
+    warning(paste("No .xlsx metadata files found in:", exp_folder_path))
+    return(NULL)
+  }
+  results <- list()
+  subfolders    <- list.dirs(exp_folder_path, recursive = FALSE, full.names = TRUE)
+  for (meta_path in meta_files) {
+    meta_filename <- basename(meta_path)
+    plate_match   <- str_extract(str_to_lower(meta_filename), "plate\\d+")
+    if (is.na(plate_match)) {
+      warning(paste("Could not extract plate number from:", meta_filename)); next
+    }
+    plate_folders <- subfolders[str_detect(str_to_lower(basename(subfolders)), fixed(plate_match))]
+    if (length(plate_folders) == 0) {
+      warning(paste("No MEAplate subfolder matching", plate_match, "in:", experiment_id)); next
+    }
+    plate_folder <- plate_folders[1]
+    all_csv      <- list.files(plate_folder, pattern = "\\.csv$",
+                               full.names = TRUE, recursive = FALSE)
+    spont_list   <- all_csv[str_detect(str_to_lower(basename(all_csv)), "spont") &
+                              str_detect(str_to_lower(basename(all_csv)), "spike_list")]
+    if (length(spont_list) == 0)
+      spont_list <- all_csv[str_detect(str_to_lower(basename(all_csv)), "spont")]
+    if (length(spont_list) == 0) {
+      warning(paste("No spont spike_list csv found in:", basename(plate_folder))); next
+    }
+    spike_path <- spont_list[1]
+    plate_id   <- paste0(experiment_id, "_", str_to_upper(plate_match))
+    results[[plate_id]] <- list(
+      plate_id      = plate_id,
+      experiment_id = experiment_id,
+      protocol      = protocol,
+      meta_path     = meta_path,
+      spike_path    = spike_path
+    )
+    cat(paste0("  Found [", plate_id, "]\n",
+               "    Metadata : ", meta_filename, "\n",
+               "    Spikes   : ", basename(spike_path), "\n"))
+  }
+  return(results)
+}
+```
+
+# Load and Prepare Data
+
+```{r load-data}
+# Load all experiments
+all_data_list <- list()
+for (i in seq_len(nrow(experiment_table))) {
+  exp_row  <- experiment_table[i, ]
+  exp_path <- file.path(ROOT_FOLDER, exp_row$experiment_folder)
+  cat(paste0("\nScanning: ", exp_row$experiment_id, " [", exp_row$protocol, "]\n"))
+  if (!dir.exists(exp_path)) { warning(paste("Folder not found:", exp_path)); next }
+  plate_files <- discover_plate_files(exp_path, exp_row$experiment_id, exp_row$protocol)
+  if (is.null(plate_files) || length(plate_files) == 0) next
+  for (plate in plate_files) {
+    cat(paste0("\n  Loading: ", plate$plate_id, " ...\n"))
+    tryCatch({
+      meta <- load_metadata_xlsx(plate$meta_path) %>%
+        mutate(plate_id = plate$plate_id, experiment_id = plate$experiment_id,
+               protocol = plate$protocol)
+      spikes   <- load_spike_file(plate$spike_path)
+      combined <- spikes %>%
+        left_join(meta, by = "well") %>%
+        mutate(plate_id = plate$plate_id, experiment_id = plate$experiment_id,
+               protocol = plate$protocol)
+      all_data_list[[plate$plate_id]] <- combined
+      cat(paste0("  ✓ ", format(nrow(combined), big.mark = ","), " spikes | ",
+                 n_distinct(combined$well), " wells\n"))
+    }, error = function(e) warning(paste("Error loading", plate$plate_id, ":", e$message)))
+  }
+}
+
+all_data_raw <- bind_rows(all_data_list)
+if (nrow(all_data_raw) == 0) stop("\nNo data loaded. Check ROOT_FOLDER and file names.\n")
+
+# Harmonise genotype names
+if (length(GENOTYPE_HARMONISE) > 0) {
+  all_data_raw <- all_data_raw %>%
+    mutate(genotype = recode(genotype, !!!GENOTYPE_HARMONISE))
+  cat("\nGenotype harmonisation applied:\n")
+  for (nm in names(GENOTYPE_HARMONISE))
+    cat(paste0("  '", nm, "' → '", GENOTYPE_HARMONISE[nm], "'\n"))
+}
+
+# Robust PBS detection (handles NA genotypes)
+all_data_raw <- all_data_raw %>%
+  mutate(is_control = case_when(
+    is.na(genotype) ~ FALSE,
+    str_detect(str_to_upper(genotype), str_to_upper(PBS_LABEL)) ~ TRUE,
+    TRUE ~ FALSE
+  ))
+
+# PBS diagnostic
+pbs_wells <- all_data_raw %>% filter(is_control) %>% distinct(plate_id, well, genotype)
+cat(paste0("\nPBS control wells detected: ", nrow(pbs_wells), "\n"))
+if (nrow(pbs_wells) > 0) print(pbs_wells) else {
+  cat("  ⚠ WARNING: No PBS wells found! Check GENOTYPE column in metadata.\n")
+  cat("  Unique genotypes found:\n")
+  print(sort(unique(all_data_raw$genotype)))
+}
+
+# Apply subset filters (PBS always kept)
+all_data <- all_data_raw
+if (!is.null(SUBSET_GENOTYPES))   all_data <- all_data %>% filter(genotype %in% SUBSET_GENOTYPES | is_control)
+if (!is.null(SUBSET_AGES))        all_data <- all_data %>% filter(age_weeks %in% SUBSET_AGES | is_control)
+if (!is.null(SUBSET_BATCHES))     all_data <- all_data %>% filter(batch %in% SUBSET_BATCHES | is_control)
+if (!is.null(SUBSET_EXPERIMENTS)) all_data <- all_data %>% filter(experiment_id %in% SUBSET_EXPERIMENTS | is_control)
+```
+
+```{r data-loading, results='asis'}
+cat(paste0("\n============================================================\n"))
+cat(paste0("\nData loaded\n"))
+cat(paste0("\n- Total spikes : ", format(nrow(all_data), big.mark = ","), "\n"))
+cat(paste0("\n- Plates       : ", paste(unique(all_data$plate_id), collapse = ", "), "\n"))
+cat(paste0("\n- Genotypes    : ", paste(sort(unique(all_data$genotype[!all_data$is_control])), collapse = ", "), "\n"))
+cat(paste0("\n- PBS spikes   : ", format(sum(all_data$is_control), big.mark = ","), "\n"))
+cat(paste0("\n- Protocols    : ", paste(unique(all_data$protocol), collapse = ", "), "\n"))
+cat(paste0("\n============================================================\n\n"))
+
+# Build colour palette
+get_genotype_order <- function(protocol) {
+  if (str_to_upper(protocol) == "CORTEX") CORTEX_GENOTYPE_ORDER else THALAMUS_GENOTYPE_ORDER
+}
+
+all_non_ctrl     <- unique(all_data$genotype[!all_data$is_control])
+preferred_order  <- unique(c(CORTEX_GENOTYPE_ORDER, THALAMUS_GENOTYPE_ORDER))
+all_non_ctrl     <- c(preferred_order[preferred_order %in% all_non_ctrl],
+                      all_non_ctrl[!all_non_ctrl %in% preferred_order])
+all_ctrl         <- unique(all_data$genotype[all_data$is_control])
+
+if (!is.null(CUSTOM_PALETTE)) {
+  palette_colors <- CUSTOM_PALETTE
+} else {
+  base_colors    <- c("#0D47A1", "#43A047", "#E53935", "#FB8C00",
+                      "#8E24AA", "#00ACC1", "#F4511E", "#6D4C41")
+  palette_colors <- setNames(
+    c(base_colors[seq_along(all_non_ctrl)], rep("grey60", length(all_ctrl))),
+    c(all_non_ctrl, all_ctrl)
+  )
+  }
+```
+
+
+```{r helper-functions}
+# ============================================================
+# --- SECTION 3: HELPERS ---
+# ============================================================
+
+get_pbs_threshold <- function(df) {
+  pbs <- df %>% filter(is_control)
+  if (nrow(pbs) == 0) { warning("No PBS wells. Threshold = 0."); return(0) }
+  thresh <- mean(pbs$amplitude_uv, na.rm = TRUE) + 3 * sd(pbs$amplitude_uv, na.rm = TRUE)
+  cat(paste0("  PBS threshold: ", round(thresh, 2), " µV\n"))
+  thresh
+}
+
+age_label <- function(age) paste0(age, " wk")
+
+# Shared heatmap theme
+heatmap_theme <- function() {
+  theme_bw() +
+    theme(
+      strip.text       = element_text(face = "bold", size = 10),
+      strip.background = element_blank(),
+      axis.title       = element_blank(),
+      axis.text        = element_text(size = 7, color = "grey50"),
+      axis.ticks       = element_line(color = "grey80"),
+      panel.grid       = element_blank(),
+      panel.spacing    = unit(0.5, "lines"),
+      legend.position  = "bottom",
+      legend.direction = "horizontal",
+      legend.key.width = unit(2, "cm"),
+      legend.title     = element_text(face = "bold", size = 11)
+    )
+}
+
+# Shared heatmap scales
+# col 1 left → col 8 right | row 1 top → row 8 bottom (matches viability display)
+heatmap_scales <- function() {
+  list(
+    scale_x_continuous(breaks = NULL, limits = c(0.5, 8.5), position = "top"),
+    scale_y_continuous(breaks = NULL, limits = c(0.5, 8.5)),  # row 1 at top
+    coord_equal()
+  )
+}
+```
+
+
+```{r analysis-function-violin-amplitude, results='asis'}
+# ============================================================
+# --- SECTION 4: ANALYSIS FUNCTIONS ---
+# ============================================================
+
+# ---------------------------------------------------------------
+# PART 1: AMPLITUDE VIOLIN PLOT
+# One PNG per age | x-axis = WT/REV | WT/GRN | REV/REV | GRN/GRN | PBS
+# Independent y-axis per age plot | pooled per genotype
+# ---------------------------------------------------------------
+run_violin <- function(df, protocol_name) {
+  cat(paste0("\n[", protocol_name, "] Part 1: Violin plots (one per age)...\n"))
+  
+  geno_order <- get_genotype_order(protocol_name)
+  thresh     <- get_pbs_threshold(df)
+  
+  # PBS label
+  pbs_label_clean <- unique(df$genotype[df$is_control])
+  pbs_label_clean <- pbs_label_clean[!is.na(pbs_label_clean)][1]
+  
+  # Full x-axis order: genotypes + PBS at end
+  full_order <- c(geno_order, pbs_label_clean)
+  
+  # Expand palette to include PBS
+  plot_palette <- palette_colors
+  if (!is.null(pbs_label_clean) && !pbs_label_clean %in% names(plot_palette)) {
+    plot_palette[pbs_label_clean] <- "grey60"
+  }
+  
+  plot_df <- df %>%
+    filter(!is.na(genotype), genotype %in% full_order) %>%
+    mutate(genotype = factor(genotype, levels = full_order))
+  
+  if (nrow(plot_df) == 0) { cat("  ⚠ No data. Skipping.\n"); return(invisible(NULL)) }
+  
+  ages_sorted <- sort(unique(plot_df$age_weeks))
+  
+  # Generate one plot per age
+  for (age in ages_sorted) {
+    age_df <- plot_df %>% filter(age_weeks == age)
+    
+    if (nrow(age_df) == 0) next
+    
+    # Drop genotypes not present at this age (keeps x-axis clean)
+    genos_present <- full_order[full_order %in% unique(age_df$genotype)]
+    age_df <- age_df %>%
+      mutate(genotype = factor(genotype, levels = genos_present))
+    
+    plot_sample <- age_df %>% sample_n(min(20000, nrow(age_df)))
+    
+    # --- Count organoids and slices per genotype ---
+    # #ORGANOID = organoid ID (same ID across plates = same physical organoid)
+    # #SLICE    = slice ID (each well with an organoid = one slice)
+    # So: n_organoids = unique organoid IDs (regardless of plate)
+    #     n_slices    = number of wells with n_organoid > 0
+    counts_df <- age_df %>%
+      distinct(plate_id, well, genotype, n_organoid) %>%
+      filter(n_organoid > 0) %>%   # exclude PBS wells
+      group_by(genotype) %>%
+      summarise(
+        total_organoids = n_distinct(n_organoid),   # unique organoid IDs
+        total_slices    = n(),                       # each row = one well = one slice
+        .groups = "drop"
+      ) %>%
+      mutate(
+        genotype    = factor(genotype, levels = genos_present),
+        count_label = paste0("n = ", total_organoids, " org\n",
+                             total_slices, " slices")
+      )
+    
+    p <- ggplot(age_df, aes(x = genotype, y = amplitude_uv, fill = genotype)) +
+      geom_violin(trim = FALSE, alpha = 0.7, scale = "width", bw = 1) +
+      geom_jitter(data = plot_sample, width = 0.2, alpha = 0.08,
+                  size = 0.4, color = "black") +
+      geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA, alpha = 0.8) +
+      geom_hline(yintercept = thresh, linetype = "dashed",
+                 color = "black", linewidth = 0.8) +
+      # Count labels placed just below x-axis ticks
+      geom_text(data = counts_df,
+                aes(x = genotype, y = -5, label = count_label),
+                size = 4.5, fontface = "italic", color = "grey30",
+                lineheight = 0.9, inherit.aes = FALSE) +
+      scale_x_discrete(labels = function(x) {
+        # PBS = plain, genotypes = italic (using plotmath expressions)
+        labs <- ifelse(str_detect(str_to_upper(x), "PBS"),
+                       as.character(x),
+                       paste0("italic('", x, "')"))
+        parse(text = labs)
+      }) +
+      scale_fill_manual(values = plot_palette) +
+      # Extra bottom margin so count labels don't get clipped
+      scale_y_continuous(limits = c(-12, 45),
+                         breaks  = seq(0, 45, by = 10),
+                         labels  = seq(0, 45, by = 10)) +
+      coord_cartesian(clip = "off") +
+      labs(
+        title   = NULL,   # no big title
+        x       = NULL,
+        y       = "Amplitude (µV)",
+        caption = paste0(age, " weeks | Dashed = PBS threshold (mean+3SD = ",
+                         round(thresh, 1), " µV)")
+      ) +
+      # --- LETTER SIZES: change base_size for overall scaling ---
+      theme_minimal(base_size = 14) +
+      theme(
+        plot.margin     = margin(t = 10, r = 10, b = 40, l = 10),
+        axis.text.x     = element_text(size = 12, face = "bold"),
+        # Note: x-axis labels use plotmath — genotypes italic, PBS plain
+        axis.text.y     = element_text(size = 11),
+        axis.title.y    = element_text(size = 13, face = "bold"),
+        plot.caption    = element_text(size = 10, color = "grey40"),
+        legend.position = "none",
+        panel.grid      = element_blank(),
+        panel.border    = element_rect(color = "grey80", fill = NA)
+      )
+    
+    fname <- file.path(OUTPUT_FOLDER,
+                       paste0(protocol_name, "_1_violin_amplitude_",
+                              age, "wk.png"))
+    ggsave(fname, plot = p,
+           width  = max(6, length(genos_present) * 1.5),
+           height = 6, dpi = 300)
+    emit_saved_png(fname)
+    cat(paste0("  ✓ Saved: ", basename(fname), "\n"))
+  }
+}
+```
+
+```{r analysis-function-violin-mfr, results='asis'}
+# ---------------------------------------------------------------
+# PART 1b: MFR SINA PLOT
+# Active electrodes coloured | inactive grey | fixed log y 0.01–0.5 Hz
+# ---------------------------------------------------------------
+run_violin_mfr <- function(df, protocol_name) {
+  cat(paste0("\n[", protocol_name, "] Part 1b: MFR sina plots (one per age)...\n"))
+  
+  geno_order <- get_genotype_order(protocol_name)
+  pbs_label_clean <- unique(df$genotype[df$is_control])
+  pbs_label_clean <- pbs_label_clean[!is.na(pbs_label_clean)][1]
+  full_order      <- c(geno_order, pbs_label_clean)
+  
+  plot_palette <- palette_colors
+  if (!is.null(pbs_label_clean) && !pbs_label_clean %in% names(plot_palette))
+    plot_palette[pbs_label_clean] <- "grey60"
+  
+  durations <- df %>%
+    group_by(plate_id, well) %>%
+    summarise(duration_s = max(time_s, na.rm = TRUE) - min(time_s, na.rm = TRUE),
+              .groups = "drop")
+  
+  mfr_df <- df %>%
+    filter(!is.na(genotype), genotype %in% full_order) %>%
+    group_by(plate_id, well, genotype, age_weeks,
+             is_control, n_organoid, electrode_id) %>%
+    summarise(n_spikes = n(), .groups = "drop") %>%
+    left_join(durations, by = c("plate_id", "well")) %>%
+    mutate(mfr_hz   = n_spikes / duration_s,
+           genotype = factor(genotype, levels = full_order))
+  
+  if (nrow(mfr_df) == 0) { cat("  ⚠ No data. Skipping.\n"); return(invisible(NULL)) }
+  
+  # PBS threshold
+  pbs_mfr    <- mfr_df %>% filter(is_control)
+  thresh_mfr <- if (nrow(pbs_mfr) > 0)
+    mean(pbs_mfr$mfr_hz, na.rm = TRUE) + 3 * sd(pbs_mfr$mfr_hz, na.rm = TRUE) else NA
+  if (!is.na(thresh_mfr))
+    cat(paste0("  PBS MFR threshold: ", round(thresh_mfr, 4), " Hz\n"))
+  
+  # Tag active vs inactive
+  mfr_df <- mfr_df %>%
+    mutate(is_active = !is.na(thresh_mfr) & mfr_hz > thresh_mfr)
+  
+  ages_sorted <- sort(unique(mfr_df$age_weeks[!mfr_df$is_control]))
+  
+  for (age in ages_sorted) {
+    age_df <- mfr_df %>% filter(age_weeks == age)
+    if (nrow(age_df) == 0) next
+    
+    genos_present <- full_order[full_order %in% unique(age_df$genotype)]
+    age_df        <- age_df %>% mutate(genotype = factor(genotype, levels = genos_present))
+    inactive_df   <- age_df %>% filter(!is_active)
+    active_df     <- age_df %>% filter(is_active)
+    
+    counts_df <- age_df %>%
+      distinct(plate_id, well, genotype, n_organoid) %>%
+      filter(n_organoid > 0) %>%
+      group_by(genotype) %>%
+      summarise(total_organoids = n_distinct(n_organoid),
+                total_slices    = n(), .groups = "drop") %>%
+      mutate(genotype    = factor(genotype, levels = genos_present),
+             count_label = paste0("n = ", total_organoids, " org\n",
+                                  total_slices, " slices"))
+    
+    median_df <- active_df %>%
+      group_by(genotype) %>%
+      summarise(median_mfr = median(mfr_hz, na.rm = TRUE), .groups = "drop")
+    
+    p <- ggplot(age_df, aes(x = genotype, y = mfr_hz)) +
+      # inactive electrodes — grey behind
+      ggforce::geom_sina(data = inactive_df,
+                         color = "grey75", alpha = 0.3,
+                         size = 0.8, maxwidth = 0.7) +
+      # active electrodes — colored in front
+      ggforce::geom_sina(data = active_df,
+                         aes(color = genotype),
+                         alpha = 0.6, size = 1.2, maxwidth = 0.7) +
+      # median of active electrodes
+      geom_crossbar(data = median_df,
+                    aes(x = genotype, y = median_mfr,
+                        ymin = median_mfr, ymax = median_mfr),
+                    width = 0.4, color = "black", linewidth = 0.7) +
+      # PBS threshold line
+      { if (!is.na(thresh_mfr))
+        geom_hline(yintercept = thresh_mfr, linetype = "dashed",
+                   color = "black", linewidth = 0.8) } +
+      # counts below x-axis
+      geom_text(data = counts_df,
+                aes(x = genotype, y = 0.007, label = count_label),
+                size = 4.5, fontface = "italic", color = "grey30",
+                lineheight = 0.9, inherit.aes = FALSE) +
+      scale_x_discrete(labels = function(x) {
+        labs <- ifelse(str_detect(str_to_upper(x), "PBS"),
+                       as.character(x),
+                       paste0("italic('", x, "')"))
+        parse(text = labs)
+      }) +
+      scale_color_manual(values = plot_palette) +
+      scale_y_log10(limits = c(0.01, 0.5),
+                    breaks = c(0.01, 0.05, 0.1, 0.5),
+                    labels = c("0.01", "0.05", "0.1", "0.5"),
+                    oob    = scales::squish) +
+      coord_cartesian(clip = "off") +
+      labs(x = NULL, y = "Mean Firing Rate (Hz, log scale)",
+           caption = paste0("Each point = one electrode | ",
+                            "Gray = below PBS threshold | ",
+                            "Colored = active (>", round(thresh_mfr, 4),
+                            " Hz) | Bar = median of active electrodes")) +
+      theme_minimal(base_size = 14) +
+      theme(plot.margin     = margin(t = 10, r = 10, b = 40, l = 10),
+            axis.text.x     = element_text(size = 12, face = "bold"),
+            axis.text.y     = element_text(size = 11),
+            axis.title.y    = element_text(size = 13, face = "bold"),
+            plot.caption    = element_text(size = 9, color = "grey40"),
+            legend.position = "none",
+            panel.grid      = element_blank(),
+            panel.border    = element_rect(color = "grey80", fill = NA))
+    
+    fname <- file.path(OUTPUT_FOLDER,
+                       paste0(protocol_name, "_1b_sina_mfr_", age, "wk.png"))
+    ggsave(fname, plot = p,
+           width  = max(6, length(genos_present) * 1.5),
+           height = 6, dpi = 300)
+    emit_saved_png(fname)
+    cat(paste0("  ✓ Saved: ", basename(fname), "\n"))
+  }
+}
+```
+
+
+```{r analysis-function-heatmap-amplitude, results='asis'}
+# ---------------------------------------------------------------
+# PART 2: AMPLITUDE HEATMAP — ONE PNG PER WELL
+# Scale: per-plate 2nd–98th percentile | legend per plate | no titles
+# ---------------------------------------------------------------
+run_heatmap_amplitude <- function(df, protocol_name) {
+  cat(paste0("\n[", protocol_name, "] Part 2: Amplitude heatmaps (per well)...\n"))
+  
+  experiments <- unique(df$experiment_id)
+  
+  for (exp_id in experiments) {
+    exp_df <- df %>% filter(experiment_id == exp_id)
+    plates <- unique(exp_df$plate_id)
+    
+    # --- Save ONE legend per experiment ---
+    # Show the overall experiment range for reference
+    min_exp <- quantile(exp_df$amplitude_uv, 0.02, na.rm = TRUE)
+    max_exp <- quantile(exp_df$amplitude_uv, 0.98, na.rm = TRUE)
+    
+    legend_df <- tibble(x = 1, y = 1, fill = mean(c(min_exp, max_exp)))
+    legend_plot <- ggplot(legend_df, aes(x = x, y = y, fill = fill)) +
+      geom_point(shape = 21, size = 6) +
+      scale_fill_gradient(
+        low    = "lightblue", high = "red",
+        limits = c(min_exp, max_exp), trans = "sqrt",
+        name   = "Mean Amplitude (µV)\n2nd–98th percentile"
+      ) +
+      guides(fill = guide_colourbar(
+        title.position = "top",    # title above bar
+        title.hjust    = 0.5,      # centre title
+        barwidth       = unit(8, "cm"),
+        barheight      = unit(0.6, "cm"),
+        ticks          = TRUE
+      )) +
+      theme_void() +
+      theme(
+        legend.position   = "bottom",
+        legend.direction  = "horizontal",
+        legend.title      = element_text(face = "bold", size = 12, hjust = 0.5),
+        legend.text       = element_text(size = 11),
+        legend.margin     = margin(t = 5)
+      )
+    legend_fname <- file.path(OUTPUT_FOLDER,
+                              paste0(protocol_name, "_", exp_id,
+                                     "_2_heatmap_amplitude_LEGEND.png"))
+    ggsave(legend_fname,
+           plot  = cowplot::get_legend(legend_plot) %>% cowplot::ggdraw(),
+           width = 8, height = 2, dpi = 300)
+    emit_saved_png(legend_fname)
+    cat(paste0("  ✓ Legend saved: ", basename(legend_fname), "\n"))
+    
+    # --- Per-plate loop (scale per plate, one PNG per well) ---
+    for (pid in plates) {
+      plate_df <- exp_df %>% filter(plate_id == pid)
+      
+      # Per-plate 2nd–98th percentile scale
+      min_a <- quantile(plate_df$amplitude_uv, 0.02, na.rm = TRUE)
+      max_a <- quantile(plate_df$amplitude_uv, 0.98, na.rm = TRUE)
+      cat(paste0("  Plate ", pid, " scale: ",
+                 round(min_a, 1), "–", round(max_a, 1), " µV\n"))
+      
+      well_list <- plate_df %>%
+        distinct(plate_id, experiment_id, well, genotype, age_weeks, is_control) %>%
+        arrange(well)
+      
+      for (i in seq_len(nrow(well_list))) {
+        w         <- well_list[i, ]
+        well_df   <- plate_df %>% filter(well == w$well)
+        
+        summary_df <- well_df %>%
+          group_by(mea_row, mea_col) %>%
+          summarise(mean_amplitude = mean(amplitude_uv, na.rm = TRUE), .groups = "drop")
+        
+        if (nrow(summary_df) == 0) {
+          cat(paste0("  ⚠ No data for ", pid, " ", w$well, ". Skipping.\n")); next
+        }
+        
+        p <- ggplot(summary_df, aes(x = mea_col, y = mea_row)) +
+          geom_point(aes(fill = mean_amplitude), shape = 21,
+                     color = "black", size = 8) +
+          heatmap_scales() +
+          scale_fill_gradient(
+            low    = "lightblue", high = "red",
+            limits = c(min_a, max_a), trans = "sqrt",
+            na.value = "white", oob = scales::squish
+          ) +
+          heatmap_theme() +
+          labs(title = NULL) +
+          theme(legend.position = "none")
+        
+        fname <- file.path(OUTPUT_FOLDER,
+                           paste0(protocol_name, "_", exp_id, "_",
+                                  pid, "_", w$well,
+                                  "_2_heatmap_amplitude.png"))
+        ggsave(fname, plot = p, width = 3, height = 3, dpi = 300)
+        emit_saved_png(fname)
+        cat(paste0("  ✓ Saved: ", basename(fname), "\n"))
+      }
+    }
+  }
+}
+```
+
+```{r analysis-function-heatmap-mfr, results='asis'}
+# ---------------------------------------------------------------
+# PART 3: MFR HEATMAP — ONE PNG PER WELL
+# Scale: per-plate 2nd–98th percentile | legend per plate | no titles
+# ---------------------------------------------------------------
+run_heatmap_mfr <- function(df, protocol_name) {
+  cat(paste0("\n[", protocol_name, "] Part 3: MFR heatmaps (per well)...\n"))
+  
+  # Recording duration per well — includes PBS wells
+  durations <- df %>%
+    group_by(plate_id, well) %>%
+    summarise(duration_s = max(time_s, na.rm = TRUE) - min(time_s, na.rm = TRUE),
+              .groups = "drop")
+  
+  # MFR per electrode per well — includes PBS wells
+  mfr_all <- df %>%
+    group_by(plate_id, experiment_id, well, electrode_id, mea_row, mea_col) %>%
+    summarise(total_spikes = n(), .groups = "drop") %>%
+    left_join(durations, by = c("plate_id", "well")) %>%
+    mutate(mfr_hz = total_spikes / duration_s)
+  
+  experiments <- unique(df$experiment_id)
+  
+  for (exp_id in experiments) {
+    exp_mfr <- mfr_all %>% filter(experiment_id == exp_id)
+    plates  <- unique(df$plate_id[df$experiment_id == exp_id])
+    
+    # --- Save ONE legend per experiment ---
+    min_exp_mfr    <- quantile(exp_mfr$mfr_hz, 0.02, na.rm = TRUE)
+    max_exp_mfr    <- quantile(exp_mfr$mfr_hz, 0.98, na.rm = TRUE)
+    median_exp_mfr <- median(exp_mfr$mfr_hz, na.rm = TRUE)
+    
+    legend_df <- tibble(x = 1, y = 1, fill = median_exp_mfr)
+    legend_plot <- ggplot(legend_df, aes(x = x, y = y, fill = fill)) +
+      geom_point(shape = 21, size = 6) +
+      scale_fill_gradient2(
+        low      = "darkgreen", mid = "lightyellow", high = "purple",
+        midpoint = median_exp_mfr,
+        limits   = c(min_exp_mfr, max_exp_mfr),
+        name     = "Mean Firing Rate (Hz)\n2nd–98th percentile"
+      ) +
+      guides(fill = guide_colourbar(
+        title.position = "top",
+        title.hjust    = 0.5,
+        barwidth       = unit(8, "cm"),
+        barheight      = unit(0.6, "cm"),
+        ticks          = TRUE
+      )) +
+      theme_void() +
+      theme(
+        legend.position  = "bottom",
+        legend.direction = "horizontal",
+        legend.title     = element_text(face = "bold", size = 12, hjust = 0.5),
+        legend.text      = element_text(size = 11),
+        legend.margin    = margin(t = 5)
+      )
+    legend_fname <- file.path(OUTPUT_FOLDER,
+                              paste0(protocol_name, "_", exp_id,
+                                     "_3_heatmap_mfr_LEGEND.png"))
+    ggsave(legend_fname,
+           plot  = cowplot::get_legend(legend_plot) %>% cowplot::ggdraw(),
+           width = 8, height = 2, dpi = 300)
+    emit_saved_png(legend_fname)
+    cat(paste0("  ✓ Legend saved: ", basename(legend_fname), "\n"))
+    
+    # --- Per-plate loop (scale per plate, one PNG per well) ---
+    for (pid in plates) {
+      plate_mfr <- exp_mfr %>% filter(plate_id == pid)
+      if (nrow(plate_mfr) == 0) next
+      
+      # Per-plate 2nd–98th percentile scale
+      min_mfr    <- quantile(plate_mfr$mfr_hz, 0.02, na.rm = TRUE)
+      max_mfr    <- quantile(plate_mfr$mfr_hz, 0.98, na.rm = TRUE)
+      median_mfr <- median(plate_mfr$mfr_hz, na.rm = TRUE)
+      cat(paste0("  Plate ", pid, " MFR scale: ",
+                 round(min_mfr, 2), "–", round(max_mfr, 2), " Hz\n"))
+      
+      well_list <- df %>%
+        filter(plate_id == pid) %>%
+        distinct(plate_id, experiment_id, well, genotype, age_weeks, is_control) %>%
+        arrange(well)
+      
+      for (i in seq_len(nrow(well_list))) {
+        w      <- well_list[i, ]
+        mfr_df <- plate_mfr %>% filter(well == w$well)
+        
+        if (nrow(mfr_df) == 0) {
+          cat(paste0("  ⚠ No data for ", pid, " ", w$well, ". Skipping.\n")); next
+        }
+        
+        p <- ggplot(mfr_df, aes(x = mea_col, y = mea_row)) +
+          geom_point(aes(fill = mfr_hz), shape = 21,
+                     color = "black", size = 8) +
+          heatmap_scales() +
+          scale_fill_gradient2(
+            low      = "darkgreen", mid = "lightyellow", high = "purple",
+            midpoint = median_mfr,
+            limits   = c(min_mfr, max_mfr),
+            na.value = "white", oob = scales::squish
+          ) +
+          heatmap_theme() +
+          labs(title = NULL) +
+          theme(legend.position = "none")
+        
+        fname <- file.path(OUTPUT_FOLDER,
+                           paste0(protocol_name, "_", exp_id, "_",
+                                  pid, "_", w$well,
+                                  "_3_heatmap_mfr.png"))
+        ggsave(fname, plot = p, width = 3, height = 3, dpi = 300)
+        emit_saved_png(fname)
+        cat(paste0("  ✓ Saved: ", basename(fname), "\n"))
+      }
+    }
+  }
+}
+```
+
+```{r analysis-function-raster, results='asis'}
+# ---------------------------------------------------------------
+# PART 4: RASTER PLOT
+# One PNG per experiment | no title
+# Top 3 electrodes per genotype stacked vertically
+# Spikes colored by amplitude | clean publication layout
+# ---------------------------------------------------------------
+run_raster <- function(df, protocol_name) {
+  cat(paste0("\n[", protocol_name, "] Part 4: Raster plots (per experiment)...\n"))
+  
+  geno_order      <- get_genotype_order(protocol_name)
+  pbs_label_clean <- unique(df$genotype[df$is_control])
+  pbs_label_clean <- pbs_label_clean[!is.na(pbs_label_clean)][1]
+  full_order      <- c(geno_order, pbs_label_clean)
+  
+  plot_df <- df %>%
+    filter(!is.na(genotype), genotype %in% full_order) %>%
+    mutate(genotype = factor(genotype, levels = full_order))
+  
+  if (nrow(plot_df) == 0) { cat("  ⚠ No data. Skipping.\n"); return(invisible(NULL)) }
+  
+  experiments <- unique(plot_df$experiment_id)
+  
+  for (exp_id in experiments) {
+    exp_df <- plot_df %>% filter(experiment_id == exp_id)
+    
+    # Top 3 most active electrodes per genotype
+    # Each electrode = one real physical electrode from one specific well
+    top_elec <- exp_df %>%
+      group_by(genotype, well, plate_id, electrode_id) %>%
+      summarise(n_spikes = n(), .groups = "drop") %>%
+      group_by(genotype) %>%
+      slice_max(n_spikes, n = 3) %>%
+      arrange(genotype, desc(n_spikes)) %>%
+      mutate(elec_num = paste0("Electrode ", row_number())) %>%
+      ungroup()
+    
+    cat(paste0("  [", exp_id, "] Top 3 electrodes per genotype:\n"))
+    print(top_elec %>% select(genotype, electrode_id, well, plate_id,
+                              n_spikes, elec_num))
+    
+    raster_df <- exp_df %>%
+      inner_join(top_elec %>% select(genotype, electrode_id, well,
+                                     plate_id, elec_num),
+                 by = c("genotype", "electrode_id", "well", "plate_id")) %>%
+      filter(time_s >= RASTER_START_TIME, time_s <= RASTER_END_TIME)
+    
+    if (nrow(raster_df) == 0) {
+      cat(paste0("  ⚠ No data in time window for ", exp_id, ". Skipping.\n"))
+      next
+    }
+    
+    # Build y-axis factor: Electrode 1 at top, 3 at bottom per genotype
+    y_levels <- top_elec %>%
+      arrange(genotype, elec_num) %>%
+      mutate(y_key = paste0(as.integer(genotype), "_", elec_num)) %>%
+      pull(y_key) %>% rev()
+    
+    raster_df <- raster_df %>%
+      mutate(y_key = factor(paste0(as.integer(genotype), "_", elec_num),
+                            levels = y_levels))
+    
+    p <- ggplot(raster_df, aes(x = time_s, y = y_key)) +
+      geom_point(aes(color = amplitude_uv), shape = "|", size = 4) +
+      scale_color_gradient(low = "lightblue", high = "darkred",
+                           name = "Amplitude (µV)") +
+      facet_grid(genotype ~ ., scales = "free_y", space = "free_y") +
+      scale_y_discrete(labels = function(x) str_extract(x, "Electrode \\d+")) +
+      labs(title = NULL,
+           x = paste0("Time (s)  |  Window: ",
+                      RASTER_START_TIME, "–", RASTER_END_TIME, " s"),
+           y = NULL) +
+      theme_classic(base_size = 13) +
+      theme(
+        strip.text       = element_text(face = "bold", size = 12),
+        strip.background = element_blank(),
+        axis.text.y      = element_text(size = 10),
+        panel.border     = element_rect(color = "black", fill = NA),
+        panel.spacing    = unit(1, "lines"),
+        legend.position  = "bottom",
+        legend.direction = "horizontal",
+        legend.key.width = unit(2, "cm"),
+        legend.title     = element_text(face = "bold", size = 10)
+      )
+    
+    n_genos <- n_distinct(raster_df$genotype)
+    fname   <- file.path(OUTPUT_FOLDER,
+                         paste0(protocol_name, "_", exp_id,
+                                "_4_raster_", RASTER_START_TIME, "s.png"))
+    ggsave(fname, plot = p,
+           width  = 12,
+           height = max(6, n_genos * 2.5),
+           dpi = 300)
+    emit_saved_png(fname)
+    cat(paste0("  ✓ Saved: ", basename(fname), "\n"))
+  }
+}
+```
+
+```{r analysis-function-isi, results='asis'}
+
+# ---------------------------------------------------------------
+# PART 5: ISI RIDGELINE PLOT
+# One PNG per experiment | panels = genotype + PBS | y = age
+# Burst window shaded (3–100ms) | spike count per ridge
+# ---------------------------------------------------------------
+
+run_isi <- function(df, protocol_name) {
+  cat(paste0("\n[", protocol_name, "] Part 5: ISI ridgeline plots (per experiment)...\n"))
+  
+  geno_order <- get_genotype_order(protocol_name)
+  thresh     <- get_pbs_threshold(df)
+  
+  experiments <- unique(df$experiment_id)
+  
+  for (exp_id in experiments) {
+    exp_df <- df %>% filter(experiment_id == exp_id)
+    
+    # No PBS — genotypes only
+    isi_df <- exp_df %>%
+      filter(!is_control, !is.na(genotype), genotype %in% geno_order) %>%
+      filter(amplitude_uv > thresh) %>%
+      mutate(
+        genotype  = factor(genotype, levels = geno_order),
+        age_label = factor(age_label(age_weeks),
+                           levels = rev(age_label(sort(unique(age_weeks)))))
+      ) %>%
+      group_by(genotype, age_label, electrode_id) %>%
+      arrange(time_s, .by_group = TRUE) %>%
+      mutate(isi_ms = (time_s - lag(time_s)) * 1000) %>%
+      ungroup() %>%
+      filter(!is.na(isi_ms), isi_ms > 0)
+    
+    if (nrow(isi_df) == 0) {
+      cat(paste0("  ⚠ No ISI data for ", exp_id, ". Skipping.\n")); next
+    }
+    
+    # Spike counts per genotype + age
+    spike_counts <- isi_df %>%
+      group_by(genotype, age_label) %>%
+      summarise(n_isi = n(), .groups = "drop") %>%
+      mutate(label = paste0("n=", format(n_isi, big.mark = ",")))
+    
+    n_ages <- n_distinct(isi_df$age_label)
+    
+    p <- ggplot(isi_df, aes(x = isi_ms, y = age_label, fill = genotype)) +
+      
+      # Burst window shading (3–100ms)
+      annotate("rect",
+               xmin = 3, xmax = 100,
+               ymin = -Inf, ymax = Inf,
+               fill = "gold", alpha = 0.12) +
+      
+      # Ridgeline densities
+      geom_density_ridges(
+        alpha = 0.7, color = "black",
+        scale = 1.5, rel_min_height = 0.01
+      ) +
+      
+      # 3ms threshold line
+      geom_vline(xintercept = 3, linetype = "dashed",
+                 color = "black", linewidth = 0.7) +
+      
+      # 100ms line
+      geom_vline(xintercept = 100, linetype = "dotted",
+                 color = "grey40", linewidth = 0.6) +
+      
+      # Spike count labels
+      geom_text(data = spike_counts,
+                aes(x = 12000, y = age_label, label = label),
+                hjust = 1, vjust = -0.5, size = 3.5,
+                color = "grey30", fontface = "italic",
+                inherit.aes = FALSE) +
+      
+      # 2-row layout: WT/REV + WT/GRN on row 1, REV/REV + GRN/GRN on row 2
+      facet_wrap(~ genotype, nrow = 2) +
+      scale_x_log10(
+        breaks = c(1, 3, 10, 100, 1000, 10000),
+        labels = c("1", "3", "10", "100", "1k", "10k")
+      ) +
+      scale_fill_manual(values = palette_colors) +
+      labs(
+        x       = "Inter-Spike Interval (ms, log scale)",
+        y       = NULL,
+        caption = "Dashed = 3 ms | Dotted = 100 ms | Shaded = burst window (3–100 ms) | Data pooled per genotype"
+      ) +
+      theme_minimal(base_size = 14) +
+      theme(
+        strip.text         = element_text(face = "bold", size = 13),
+        axis.text.y        = element_text(face = "bold", size = 12),
+        legend.position    = "none",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank()
+      )
+    
+    fname <- file.path(OUTPUT_FOLDER,
+                       paste0(protocol_name, "_", exp_id,
+                              "_5_isi_ridgeline.png"))
+    ggsave(fname, plot = p,
+           width  = max(8, 4.5 * 2),        # 2 columns
+           height = max(6, n_ages * 2 * 2),  # 2 rows
+           dpi = 300)
+    emit_saved_png(fname)
+    cat(paste0("  ✓ Saved: ", basename(fname), "\n"))
+  }
+}
+```
+
+# Run Analyses {.tabset}
+
+```{r run-analyses, results='asis'}
+# ============================================================
+# --- SECTION 5: RUN ALL ANALYSES PER PROTOCOL ---
+# ============================================================
+
+for (proto in unique(all_data$protocol)) {
+  cat('\n\n##', proto, "{.tabset}\n\n")
+  cat(paste0("\n**Protocol: ", proto, "**\n"))
+  
+  proto_data <- all_data %>% filter(protocol == proto)
+  if (nrow(proto_data) == 0) { cat("  ⚠ No data. Skipping.\n"); next }
+  
+  ages   <- sort(unique(proto_data$age_weeks[!proto_data$is_control]))
+  genos  <- sort(unique(proto_data$genotype[!proto_data$is_control]))
+  plates <- unique(proto_data$plate_id)
+  
+  cat(paste0("\n- Ages      : ", paste(ages, collapse = ", "), " weeks\n"))
+  cat(paste0("- Genotypes : ", paste(genos, collapse = ", "), "\n"))
+  cat(paste0("- Plates    : ", paste(plates, collapse = ", "), "\n\n"))
+
+  cat('\n\n### Amplitude Violin Plots\n\n')
+  if (RUN_VIOLIN_AMPLITUDE)  run_violin(proto_data, proto)
+  cat("\n\n### MFR Violin Plots\n\n")
+  if (RUN_VIOLIN_MFR)        run_violin_mfr(proto_data, proto)
+  cat("\n\n### Amplitude Heatmap\n\n")
+  if (RUN_HEATMAP_AMPLITUDE) run_heatmap_amplitude(proto_data, proto)
+  cat("\n\n### MFR Heatmap\n\n")
+  if (RUN_HEATMAP_MFR)       run_heatmap_mfr(proto_data, proto)
+  cat("\n\n### Raster\n\n")
+  if (RUN_RASTER)            run_raster(proto_data, proto)
+  cat("\n\n### Interval\n\n")
+  if (RUN_ISI_RIDGELINE)     run_isi(proto_data, proto)
+}
+
+cat(paste0("\n\n ✓ All done! Plots saved to:\n  ", OUTPUT_FOLDER, "\n"))
+```
+
+# Session info
+
+```{r session_info, collapse=FALSE}
+sessionInfo()
+```
