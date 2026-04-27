@@ -1,5 +1,8 @@
 ---
 title: "MEA Organoids Spontaneous Baseline Analysis"
+params:
+  input_subfolder: ""
+  experiment_id: ""
 output:
   html_document:
     toc: true
@@ -90,8 +93,12 @@ OUTPUT_FOLDER <- HTML_OUTPUT_FOLDER
 # ------------------------------------------------------------------
 experiment_table <- tribble(
   ~experiment_folder,          ~protocol,   ~experiment_id,
-  "5_MEA_experiment_5-2026",   "CORTEX",    "Exp5",
+  params$input_subfolder,      "CORTEX",    params$experiment_id,
 )
+
+if (!nzchar(params$input_subfolder) || !nzchar(params$experiment_id)) {
+  stop("Provide input_subfolder and experiment_id when rendering this report.")
+}
 
 # ------------------------------------------------------------------
 # STEP 3: GENOTYPE ORDER

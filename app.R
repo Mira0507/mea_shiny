@@ -1,4 +1,5 @@
 project_root <- normalizePath(".", mustWork = TRUE)
+options(shiny.maxRequestSize = 1024^3)
 local_r_lib <- file.path(project_root, "env", "lib", "R", "library")
 if (dir.exists(local_r_lib)) {
   .libPaths(c(local_r_lib, .libPaths()))
@@ -40,6 +41,166 @@ if (!dir.exists(plot_dir)) {
   dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
 }
 addResourcePath("analysis-output", plot_dir)
+
+zip_display_name <- function(upload_name) {
+  basename(str_replace_all(upload_name, "\\\\", "/"))
+}
+
+input_subfolder_from_zip <- function(upload_name) {
+  subfolder <- tools::file_path_sans_ext(zip_display_name(upload_name))
+  subfolder <- str_trim(subfolder)
+  if (!nzchar(subfolder)) {
+    stop("Uploaded zip file must have a non-empty filename.")
+  }
+  subfolder
+}
+
+input_zip_path <- function(input_subfolder) {
+  file.path(input_dir, paste0(input_subfolder, ".zip"))
+}
+
+analysis_input_folder_path <- function(input_subfolder) {
+  file.path(input_dir, input_subfolder)
+}
+
+current_input_zip <- function() {
+  zips <- list.files(input_dir, pattern = "\\.zip$", full.names = TRUE, recursive = FALSE)
+  if (length(zips) == 0) return(NA_character_)
+  zips[order(file.info(zips)$mtime, decreasing = TRUE)][[1]]
+}
+
+current_input_subfolder <- function() {
+  folders <- list.dirs(input_dir, recursive = FALSE, full.names = TRUE)
+  if (length(folders) == 0) return(NA_character_)
+  folders[order(file.info(folders)$mtime, decreasing = TRUE)][[1]] |>
+    basename()
+}
+
+validate_zip_entries <- function(zip_path) {
+  entries <- utils::unzip(zip_path, list = TRUE)
+  entry_names <- entries$Name
+  normalized_names <- str_replace_all(entry_names, "\\\\", "/")
+  path_parts <- strsplit(normalized_names, "/", fixed = TRUE)
+  has_parent_dir <- vapply(path_parts, function(parts) ".." %in% parts, logical(1))
+  is_absolute <- str_detect(normalized_names, "^/|^[A-Za-z]:")
+
+  unsafe <- entry_names[has_parent_dir | is_absolute]
+  if (length(unsafe) > 0) {
+    stop("tables.zip contains unsafe paths: ", paste(unsafe, collapse = ", "))
+  }
+
+  entries
+}
+
+remove_macos_zip_artifacts <- function(path) {
+  macos_dir <- file.path(path, "__MACOSX")
+  if (dir.exists(macos_dir)) {
+    unlink(macos_dir, recursive = TRUE, force = TRUE)
+  }
+
+  apple_double_files <- list.files(
+    path,
+    pattern = "^\\._",
+    all.files = TRUE,
+    recursive = TRUE,
+    full.names = TRUE,
+    include.dirs = TRUE,
+    no.. = TRUE
+  )
+  if (length(apple_double_files) > 0) {
+    unlink(apple_double_files, recursive = TRUE, force = TRUE)
+  }
+}
+
+prepare_tables_input <- function(zip_path, input_subfolder) {
+  analysis_input_folder <- analysis_input_folder_path(input_subfolder)
+
+  if (!file.exists(zip_path)) {
+    stop("Expected uploaded input zip at: ", relative_path(zip_path))
+  }
+
+  validate_zip_entries(zip_path)
+
+  if (dir.exists(analysis_input_folder)) {
+    unlink(analysis_input_folder, recursive = TRUE, force = TRUE)
+  }
+  dir.create(analysis_input_folder, recursive = TRUE, showWarnings = FALSE)
+
+  utils::unzip(zip_path, exdir = analysis_input_folder)
+  remove_macos_zip_artifacts(analysis_input_folder)
+
+  metadata_files <- list.files(
+    analysis_input_folder,
+    pattern = "\\.xlsx$",
+    recursive = FALSE,
+    full.names = TRUE
+  )
+  plate_folders <- list.dirs(analysis_input_folder, recursive = FALSE, full.names = TRUE)
+  plate_folders <- plate_folders[str_detect(str_to_lower(basename(plate_folders)), "plate\\d+")]
+
+  if (length(metadata_files) == 0) {
+    stop("tables.zip did not contain any top-level metadata .xlsx files.")
+  }
+  if (length(plate_folders) == 0) {
+    stop("tables.zip did not contain any top-level MEA plate folders.")
+  }
+
+  invisible(analysis_input_folder)
+}
+
+reset_output_dir <- function() {
+  if (dir.exists(plot_dir)) {
+    unlink(plot_dir, recursive = TRUE, force = TRUE)
+  }
+  dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+  invisible(plot_dir)
+}
+
+reset_input_dir_for_upload <- function() {
+  if (!dir.exists(input_dir)) {
+    dir.create(input_dir, recursive = TRUE, showWarnings = FALSE)
+    return(invisible(input_dir))
+  }
+
+  entries <- list.files(input_dir, all.files = TRUE, full.names = TRUE, no.. = TRUE)
+  if (length(entries) > 0) {
+    unlink(entries, recursive = TRUE, force = TRUE)
+  }
+
+  invisible(input_dir)
+}
+
+accept_uploaded_tables_zip <- function(upload) {
+  if (is.null(upload) || nrow(upload) == 0) {
+    stop("No zip file was uploaded.")
+  }
+  upload_name <- zip_display_name(upload$name[[1]])
+  input_subfolder <- input_subfolder_from_zip(upload_name)
+  zip_path <- input_zip_path(input_subfolder)
+
+  if (!str_detect(str_to_lower(upload_name), "\\.zip$")) {
+    stop("Uploaded file must be a .zip file.")
+  }
+
+  reset_input_dir_for_upload()
+  reset_output_dir()
+  validate_zip_entries(upload$datapath[[1]])
+
+  if (!file.copy(upload$datapath[[1]], zip_path, overwrite = TRUE)) {
+    stop("Could not copy uploaded zip to: ", relative_path(zip_path))
+  }
+
+  prepare_tables_input(zip_path, input_subfolder)
+
+  list(
+    name = upload_name,
+    input_subfolder = input_subfolder,
+    zip_path = zip_path,
+    size_mb = round(upload$size[[1]] / 1024^2, 2),
+    metadata_rows = nrow(metadata_inventory()),
+    input_files = nrow(input_file_inventory())
+  )
+}
 
 relative_path <- function(path) {
   path <- normalizePath(path, winslash = "/", mustWork = FALSE)
@@ -521,6 +682,26 @@ ui <- page_navbar(
     "))
   ),
   nav_panel(
+    "Upload",
+    div(
+      class = "page-wrap",
+      div(class = "section-title", "Upload input zip"),
+      textInput(
+        "experiment_id",
+        "Experiment ID",
+        placeholder = "e.g. Exp6"
+      ),
+      fileInput(
+        "tables_zip_upload",
+        "Input zip",
+        accept = ".zip",
+        buttonLabel = "Browse",
+        placeholder = "No zip selected"
+      ),
+      uiOutput("upload_status")
+    )
+  ),
+  nav_panel(
     "Metadata",
     div(
       class = "page-wrap",
@@ -600,6 +781,9 @@ server <- function(input, output, session) {
   refresh_key <- reactiveVal(Sys.time())
   analysis_log <- reactiveVal(character())
   run_state <- reactiveVal("Ready")
+  upload_message <- reactiveVal(NULL)
+  uploaded_input_subfolder <- reactiveVal(NULL)
+  uploaded_zip_path <- reactiveVal(NULL)
 
   metadata_data <- reactive({
     refresh_key()
@@ -621,8 +805,85 @@ server <- function(input, output, session) {
     run_state("Refreshed")
   })
 
+  observeEvent(input$tables_zip_upload, {
+    run_state("Preparing upload")
+    analysis_log(character())
+    upload_message(NULL)
+
+    result <- tryCatch(
+      {
+        info <- accept_uploaded_tables_zip(input$tables_zip_upload)
+        uploaded_input_subfolder(info$input_subfolder)
+        uploaded_zip_path(info$zip_path)
+        run_state("Input uploaded")
+        list(
+          ok = TRUE,
+          text = paste0(
+            "Uploaded ", info$name, " (", info$size_mb, " MB). ",
+            "Input subfolder: ", info$input_subfolder, ". ",
+            "Prepared ", info$metadata_rows, " metadata rows and ",
+            info$input_files, " input files. Output was reset."
+          )
+        )
+      },
+      error = function(err) {
+        run_state("Upload failed")
+        list(ok = FALSE, text = paste("Upload failed:", conditionMessage(err)))
+      }
+    )
+
+    upload_message(result)
+    refresh_key(Sys.time())
+  })
+
+  output$upload_status <- renderUI({
+    message <- upload_message()
+    if (is.null(message)) {
+      zip_path <- current_input_zip()
+      if (!is.na(zip_path) && file.exists(zip_path)) {
+        zip_info <- file.info(zip_path)
+        return(div(
+          class = "run-status",
+          paste0(
+            "Current input: ", relative_path(zip_path), " | ",
+            round(zip_info$size / 1024^2, 2), " MB"
+          )
+        ))
+      }
+      return(empty_state("Upload a zip file before running analysis."))
+    }
+
+    div(
+      class = if (isTRUE(message$ok)) "run-status" else "empty-state",
+      message$text
+    )
+  })
+
   observeEvent(input$run_analysis, {
     req(file.exists(analysis_rmd))
+    experiment_id <- input$experiment_id
+    if (is.null(experiment_id)) experiment_id <- ""
+    experiment_id <- str_trim(experiment_id)
+    if (!nzchar(experiment_id)) {
+      run_state("Failed")
+      analysis_log("ERROR: Experiment ID is required.")
+      return()
+    }
+
+    input_subfolder <- uploaded_input_subfolder()
+    if (is.null(input_subfolder) || !nzchar(input_subfolder)) {
+      input_subfolder <- current_input_subfolder()
+    }
+    zip_path <- uploaded_zip_path()
+    if (is.null(zip_path) || !file.exists(zip_path)) {
+      zip_path <- current_input_zip()
+    }
+    if (is.na(input_subfolder) || !nzchar(input_subfolder) || is.na(zip_path) || !file.exists(zip_path)) {
+      run_state("Failed")
+      analysis_log("ERROR: Upload a zip file before running analysis.")
+      return()
+    }
+
     run_state("Running")
     analysis_log(character())
 
@@ -630,12 +891,22 @@ server <- function(input, output, session) {
       log <- tryCatch(
         {
           captured <- capture.output(
-            rmarkdown::render(
-              input = analysis_rmd,
-              output_dir = plot_dir,
-              envir = new.env(parent = globalenv()),
-              quiet = TRUE
-            ),
+            {
+              cat("Preparing fresh input from ", relative_path(zip_path), "\n")
+              prepare_tables_input(zip_path, input_subfolder)
+              cat("Resetting output directory\n")
+              reset_output_dir()
+              rmarkdown::render(
+                input = analysis_rmd,
+                output_dir = plot_dir,
+                params = list(
+                  input_subfolder = input_subfolder,
+                  experiment_id = experiment_id
+                ),
+                envir = new.env(parent = globalenv()),
+                quiet = TRUE
+              )
+            },
             type = "output"
           )
           incProgress(0.7)
