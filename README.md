@@ -1,6 +1,6 @@
 # MEA Shiny Analysis
 
-Shiny app for running the MEA baseline analysis and browsing its metadata, 
+A Shiny app for running the MEA baseline analysis and browsing its metadata, 
 plots, rendered HTML report, and downloadable output archive.
 
 ## Contents
@@ -41,7 +41,7 @@ following screenshot:
 
 ![inputzip](images/zip.png)
 
-Specify the _Experiment ID_ and path to the `.zip` file in the _Upload_ page:
+Specify the _Experiment ID_ and the path to the `.zip` file in the _Upload_ page:
 
 ![upload](images/upload.png)
 
@@ -56,12 +56,16 @@ Once the input is successfully loaded, run the analysis in the _Metadata_ page:
 
 ![analysis](images/metadata.png)
 
-This will take a few to seconds to minutes, depending on your computational
-power and the size of input. You will see the metadata table loaded after 
-completing the run:
+This can take anywhere from a few seconds to a few minutes, depending on 
+your computational power and the size of the input. The metadata table appears
+after the run completes:
 
 ![metatable](images/run.png)
 
 ## Output
 
-The analysis writes plots, the rendered HTML report, and `report.zip` to `output/`. The Shiny tabs show metadata, input files, amplitude and firing-rate plots, heatmaps, raster plots, ISI plots, and report download links.
+The analysis writes plots, the rendered HTML report, and `report.zip` to `output/`. 
+The Shiny tabs show metadata, input files, and output plots. The output package, 
+`report.zip`, provides access to the data without running the app:
+
+![outputpackage](images/output.png)
