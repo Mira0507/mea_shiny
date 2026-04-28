@@ -785,6 +785,11 @@ server <- function(input, output, session) {
   uploaded_input_subfolder <- reactiveVal(NULL)
   uploaded_zip_path <- reactiveVal(NULL)
 
+  uploaded_zip_ready <- reactive({
+    zip_path <- uploaded_zip_path()
+    isTRUE(length(zip_path) == 1 && !is.na(zip_path) && file.exists(zip_path))
+  })
+
   metadata_data <- reactive({
     refresh_key()
     metadata_inventory()
@@ -809,6 +814,8 @@ server <- function(input, output, session) {
     run_state("Preparing upload")
     analysis_log(character())
     upload_message(NULL)
+    uploaded_input_subfolder(NULL)
+    uploaded_zip_path(NULL)
 
     result <- tryCatch(
       {
@@ -839,17 +846,6 @@ server <- function(input, output, session) {
   output$upload_status <- renderUI({
     message <- upload_message()
     if (is.null(message)) {
-      zip_path <- current_input_zip()
-      if (!is.na(zip_path) && file.exists(zip_path)) {
-        zip_info <- file.info(zip_path)
-        return(div(
-          class = "run-status",
-          paste0(
-            "Current input: ", relative_path(zip_path), " | ",
-            round(zip_info$size / 1024^2, 2), " MB"
-          )
-        ))
-      }
       return(empty_state("Upload a zip file before running analysis."))
     }
 
@@ -871,14 +867,8 @@ server <- function(input, output, session) {
     }
 
     input_subfolder <- uploaded_input_subfolder()
-    if (is.null(input_subfolder) || !nzchar(input_subfolder)) {
-      input_subfolder <- current_input_subfolder()
-    }
     zip_path <- uploaded_zip_path()
-    if (is.null(zip_path) || !file.exists(zip_path)) {
-      zip_path <- current_input_zip()
-    }
-    if (is.na(input_subfolder) || !nzchar(input_subfolder) || is.na(zip_path) || !file.exists(zip_path)) {
+    if (!uploaded_zip_ready() || is.null(input_subfolder) || is.na(input_subfolder) || !nzchar(input_subfolder)) {
       run_state("Failed")
       analysis_log("ERROR: Upload a zip file before running analysis.")
       return()
@@ -926,6 +916,10 @@ server <- function(input, output, session) {
 
   output$run_status <- renderUI({
     state <- run_state()
+    if (!uploaded_zip_ready()) {
+      return(span(class = "run-status", paste(state, "|", "No uploaded input")))
+    }
+
     last_plot <- plots_data() |>
       pull(modified) |>
       max(na.rm = TRUE)
@@ -940,6 +934,8 @@ server <- function(input, output, session) {
   })
 
   output$metadata_stats <- renderUI({
+    validate(need(uploaded_zip_ready(), "Upload a zip file to view metadata."))
+
     meta <- metadata_data()
     files <- input_files_data()
     plots <- plots_data()
@@ -956,6 +952,8 @@ server <- function(input, output, session) {
   })
 
   output$metadata_table <- renderDT({
+    validate(need(uploaded_zip_ready(), "Upload a zip file to view metadata."))
+
     metadata_data() |>
       arrange(experiment_folder, plate, well) |>
       datatable(
@@ -966,6 +964,8 @@ server <- function(input, output, session) {
   })
 
   output$input_files_table <- renderDT({
+    validate(need(uploaded_zip_ready(), "Upload a zip file to view input files."))
+
     input_files_data() |>
       datatable(
         rownames = FALSE,
@@ -975,12 +975,16 @@ server <- function(input, output, session) {
   })
 
   output$amplitude_violin_gallery <- renderUI({
+    validate(need(uploaded_zip_ready(), "Upload a zip file to view plots."))
+
     rows <- plots_data() |>
       filter(category == "amplitude_violin")
     gallery_ui(rows)
   })
 
   output$mfr_gallery <- renderUI({
+    validate(need(uploaded_zip_ready(), "Upload a zip file to view plots."))
+
     rows <- plots_data() |>
       filter(category == "mfr_sina")
     gallery_ui(rows)
@@ -1018,6 +1022,8 @@ server <- function(input, output, session) {
   }
 
   output$amplitude_heatmap_view <- renderUI({
+    validate(need(uploaded_zip_ready(), "Upload a zip file to view plots."))
+
     rows <- all_heatmap_rows("amplitude_heatmap")
     legends <- heatmap_legend_rows("amplitude_heatmap", rows)
     tagList(
@@ -1027,6 +1033,8 @@ server <- function(input, output, session) {
   })
 
   output$mfr_heatmap_view <- renderUI({
+    validate(need(uploaded_zip_ready(), "Upload a zip file to view plots."))
+
     rows <- all_heatmap_rows("mfr_heatmap")
     legends <- heatmap_legend_rows("mfr_heatmap", rows)
     tagList(
@@ -1036,18 +1044,24 @@ server <- function(input, output, session) {
   })
 
   output$raster_gallery <- renderUI({
+    validate(need(uploaded_zip_ready(), "Upload a zip file to view plots."))
+
     rows <- plots_data() |>
       filter(category == "raster")
     gallery_ui(rows)
   })
 
   output$isi_gallery <- renderUI({
+    validate(need(uploaded_zip_ready(), "Upload a zip file to view plots."))
+
     rows <- plots_data() |>
       filter(category == "isi")
     gallery_ui(rows)
   })
 
   output$report_link <- renderUI({
+    validate(need(uploaded_zip_ready(), "Upload and run analysis to view the report."))
+
     report <- list.files(plot_dir, pattern = "\\.html$", full.names = FALSE)
     if (length(report) == 0) {
       return(empty_state("No rendered HTML report found."))
@@ -1064,6 +1078,8 @@ server <- function(input, output, session) {
   })
 
   output$report_zip_link <- renderUI({
+    validate(need(uploaded_zip_ready(), "Upload and run analysis to view compressed output."))
+
     refresh_key()
     zip_path <- tryCatch(
       create_report_zip(),
