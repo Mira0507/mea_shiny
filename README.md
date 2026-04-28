@@ -45,8 +45,16 @@ Specify the _Experiment ID_ and path to the `.zip` file in the _Upload_ page:
 
 ![upload](images/upload.png)
 
+![loaded](images/loaded.png)
+
 In the backend, the app stores the zip under `input/` and extracts it into 
 `input/<zip-name>/` for analysis.
+
+## Analysis
+
+Once the input is successfully loaded, run the analysis in the _Metadata_ page:
+
+![analysis](images/metadata.png)
 
 ## Output
 
