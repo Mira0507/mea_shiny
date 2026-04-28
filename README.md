@@ -1,30 +1,30 @@
 # MEA Shiny Analysis
 
-Shiny app for running the MEA organoid spontaneous baseline analysis and browsing its metadata, plots, rendered HTML report, and downloadable output archive.
+Shiny app for running the MEA baseline analysis and browsing its metadata, 
+plots, rendered HTML report, and downloadable output archive.
 
 ## Contents
 
 - `app.R` - Shiny UI/server, upload handling, report rendering, and result gallery.
-- `analysis/MEA_organoids_spont_basesline_local_paths.Rmd` - parameterized analysis report used by the app.
-- `env.archived.yaml` - Conda package list for rebuilding the R environment.
-- `input/` - uploaded MEA zip files and extracted data; ignored by git.
-- `output/` - rendered reports, plots, and `report.zip`; ignored by git.
+- `deploy.R` (optional) - Deployment code (`shiny::runApp(".")`)
+- `analysis/MEA_organoids_spont_basesline_local_paths.Rmd` - Analysis code used by the app.
+- `env.archived.yaml` - Exported conda environment
 
 ## Requirements
 
-R with the packages listed in `env.archived.yaml`, including Shiny, bslib, DT, dplyr, readxl, rmarkdown, stringr, tibble, tidyverse, ggridges, cowplot, and ggforce.
+R with the packages listed in `env.archived.yaml`.
 
 Optional Conda setup:
 
 ```sh
-conda env create --name mea-shiny --file env.archived.yaml
+conda env create --name shiny --file env.archived.yaml
 conda activate mea-shiny
 ```
 
 ## Run
 
 ```sh
-Rscript deploy.R
+$ Rscript deploy.R
 ```
 
 or from R:
@@ -35,7 +35,18 @@ shiny::runApp(".")
 
 ## Input Format
 
-Upload a `.zip` through the app. The zip should contain top-level metadata `.xlsx` files and MEA plate folders whose names include `plate1`, `plate2`, etc. The app stores the zip under `input/`, extracts it into `input/<zip-name>/`, and requires an Experiment ID before running.
+Upload a `.zip` through the app. The zip should contain top-level metadata `.xlsx` files
+and MEA plate folders whose names include `plate1`, `plate2`, etc, as shown in the 
+following screenshot:
+
+![inputzip](images/zip.png)
+
+Specify the _Experiment ID_ and path to the `.zip` file in the _Upload_ page:
+
+![upload](images/upload.png)
+
+In the backend, the app stores the zip under `input/` and extracts it into 
+`input/<zip-name>/` for analysis.
 
 ## Output
 
