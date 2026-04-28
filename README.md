@@ -56,6 +56,12 @@ Once the input is successfully loaded, run the analysis in the _Metadata_ page:
 
 ![analysis](images/metadata.png)
 
+This will take a few to seconds to minutes, depending on your computational
+power and the size of input. You will see the metadata table loaded after 
+completing the run:
+
+![metatable](images/run.png)
+
 ## Output
 
 The analysis writes plots, the rendered HTML report, and `report.zip` to `output/`. The Shiny tabs show metadata, input files, amplitude and firing-rate plots, heatmaps, raster plots, ISI plots, and report download links.
